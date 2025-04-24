@@ -1,0 +1,54 @@
+module(
+    name = "natty",
+    version = "0.1.0",
+)
+
+################################################################################
+# BEGIN: Python Configuration Copied from rules_python Repo:
+#   https://github.com/bazel-contrib/rules_python/blob/bb7b164fc1214b319a085222f5ce2a8ef41841c9/examples/bzlmod/MODULE.bazel#L1
+################################################################################
+
+bazel_dep(name = "rules_python", version = "1.3.0")
+bazel_dep(name = "rules_uv", version = "0.68.0")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "pypi",
+    python_version = "3.11",
+    requirements_lock = "//:requirements.txt",
+)
+use_repo(pip, "pypi")
+
+
+# # Only needed to make rules_python's CI happy. rules_java 8.3.0+ is needed so
+# # that --java_runtime_version=remotejdk_11 works with Bazel 8.
+# bazel_dep(name = "rules_java", version = "8.3.1")
+# # Only needed to make rules_python's CI happy. A test verifies that
+# # MODULE.bazel.lock is cross-platform friendly, and there are transitive
+# # dependencies on rules_rust, so we need rules_rust 0.54.1+ where such issues
+# # were fixed.
+# bazel_dep(name = "rules_rust", version = "0.54.1")
+
+# # We next initialize the python toolchain using the extension.
+# # You can set different Python versions in this block.
+# python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+# python.toolchain(
+#     configure_coverage_tool = True,
+#     # Only set when you have multiple toolchain versions.
+#     is_default = True,
+#     python_version = "3.12",
+# )
+
+# # EXPERIMENTAL: This is experimental and may be changed or removed without notice
+# uv = use_extension(
+#     "@rules_python//python/uv:uv.bzl",
+#     "uv",
+#     # Use `dev_dependency` so that the toolchains are not defined pulled when your
+#     # module is used elsewhere.
+#     dev_dependency = True,
+# )
+# uv.configure(version = "0.6.16")
+
+################################################################################
+# END: Python Configuration Copied from rules_python Repo:
+################################################################################
