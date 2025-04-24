@@ -61,7 +61,13 @@ def construct_system_prompt(dep_py_contents: Dict[str, str]) -> str:
     """
     dependencies_section = ""
     if dep_py_contents:
-        dependencies_section += "\n\nThe following Python code snippets are dependencies that can be used in the generated implementation. Ensure the generated code correctly interacts with them if necessary:\n\n"
+        dependencies_section += """
+
+The following Python code snippets are dependencies that can be used in the generated implementation. 
+DO NOT DUPLICATE THE CODE IN THESE DEPENDENCIES. 
+Ensure the generated code correctly interacts with them via import statements if necessary:
+
+"""
         for name, content in dep_py_contents.items():
             dependencies_section += f"# Dependency: {name}\n{content}\n---\n"
 
