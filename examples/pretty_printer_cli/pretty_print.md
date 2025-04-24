@@ -1,0 +1,1 @@
+A simple python function that prints the given string inside a box.

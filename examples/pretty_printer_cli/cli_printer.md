@@ -1,0 +1,1 @@
+This is going to be a simple command line app that will just act like a REPL that takes in any text from the user and then pretty prints it using its dependency.

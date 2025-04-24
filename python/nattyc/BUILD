@@ -9,5 +9,6 @@ py_binary(
     requirement("asyncclick"),
     requirement("google-genai"),
     requirement("pydantic"),
-  ]
+  ],
+  visibility = ["//visibility:public"],
 )
