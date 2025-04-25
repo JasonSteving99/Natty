@@ -14,4 +14,5 @@ natty_binary(
 natty_library(
     name = "pretty_print",
     src = "pretty_print.md",
+    visibility = ["//visibility:public"]
 )

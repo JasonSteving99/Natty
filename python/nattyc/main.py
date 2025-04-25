@@ -5,7 +5,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, cast
 
 import asyncclick as click
 
@@ -50,11 +50,15 @@ def setup_logging(level: int = logging.INFO) -> None:
     )
 
 
-def construct_system_prompt(dep_py_contents: Dict[str, str]) -> str:
+def construct_system_prompt(
+    dep_py_contents: dict[str, str],
+    dep_doc_contents: dict[str, str],
+) -> str:
     """Constructs the system prompt for the LLM.
 
     Args:
         dep_py_contents: Dictionary mapping dependency names to their code contents
+        dep_doc_contents: Dictionary mapping documentation names to their contents
 
     Returns:
         A formatted system prompt string for the LLM
@@ -71,8 +75,19 @@ Ensure the generated code correctly interacts with them via import statements if
         for name, content in dep_py_contents.items():
             dependencies_section += f"# Dependency: {name}\n{content}\n---\n"
 
+    documentation_section = ""
+    if dep_doc_contents:
+        documentation_section += """
+
+The following is collected documentation that should be referenced in planning the approach. This
+documentation includes necessary information for correct implementation:
+
+"""
+        for name, content in dep_doc_contents.items():
+            documentation_section += f"# Documentation: {name}\n{content}\n---\n"
+
     # Emphasize quality requirements
-    return f"""You are a helpful assistant that translates English descriptions into Python code.{dependencies_section}
+    return f"""You are a helpful assistant that translates English descriptions into Python code.{dependencies_section}{documentation_section}
 
 Requirements for the generated code:
 1. Add proper type hints to all functions and variables
@@ -145,7 +160,7 @@ async def call_llm(
                     if category is not HarmCategory.HARM_CATEGORY_UNSPECIFIED
                 ],
                 response_mime_type="application/json",
-                response_schema=GeneratedCode.model_json_schema(),
+                response_schema=GeneratedCode,
             ),
         )
 
@@ -155,17 +170,10 @@ async def call_llm(
 
         # Extract the text from the response
         text = ""
-        if response.candidates:
-            candidate = response.candidates[0]
-            if candidate.content and candidate.content.parts:
-                raw_response_text = "".join(
-                    part.text for part in candidate.content.parts if part.text
-                )
-                # Parse the LLM's response and extract ONLY the generated code - the reasoning was
-                # just for the model's own benefit.
-                text = GeneratedCode.model_validate_json(
-                    raw_response_text
-                ).generated_code
+        if response.parsed:
+            # Parse the LLM's response and extract ONLY the generated code - the reasoning was
+            # just for the model's own benefit.
+            text = cast(GeneratedCode, response.parsed).generated_code
 
         # Create usage stats dictionary (estimate, as Gemini might not provide exact counts)
         usage = {
@@ -256,6 +264,11 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
     help="Path to output Python file",
 )
 @click.option(
+    "--package",
+    required=True,
+    help="The package that can be used to specify importing this generated file.",
+)
+@click.option(
     "--dep_py",
     multiple=True,
     type=click.Path(
@@ -268,6 +281,20 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
     ),
     default=[],
     help="Paths to dependency Python files",
+)
+@click.option(
+    "--dep_doc",
+    multiple=True,
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        path_type=Path,
+        resolve_path=True,
+        readable=True,
+    ),
+    default=[],
+    help="Paths to documentation files to be fed to the LLM to aid codegen.",
 )
 @click.option(
     "--llm_model", required=True, help="LLM model name (e.g., gemini-2.0-flash-001)"
@@ -286,7 +313,9 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
 async def main(
     input_txt: Path,
     output_py: Path,
+    package: str,
     dep_py: list[Path],
+    dep_doc: list[Path],
     llm_model: str,
     temperature: float,
     max_output_tokens: int,
@@ -304,8 +333,13 @@ async def main(
         # Read dependency Python code
         dep_py_contents = read_dependencies(dep_py)
 
+        # Read docs to seed the LLM with context.
+        dep_docs_contents = read_dependencies(dep_doc)
+
         # Construct the prompt
-        system_prompt = construct_system_prompt(dep_py_contents)
+        system_prompt = construct_system_prompt(
+            dep_py_contents=dep_py_contents, dep_doc_contents=dep_docs_contents
+        )
 
         # Get API Key
         api_key = os.environ.get(api_key_env_var)
@@ -332,6 +366,8 @@ async def main(
 
         # Write the output
         with open(output_py, "w") as f:
+            f.write("# Usage: Import from this package using the following:\n")
+            f.write(f"# from {package} import <name to import>\n\n")
             f.write(response.text)
 
         # Log success message with usage stats

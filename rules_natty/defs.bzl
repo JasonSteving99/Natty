@@ -26,7 +26,11 @@ def _natty_library_impl(ctx):
     args = ctx.actions.args()
     args.add("--input_txt", input_txt.path)
     args.add("--output_py", output_py.path)
-    args.add_all("--dep_py", [f.path for f in dep_py_files])
+    args.add("--package", ctx.attr.package)
+    for f in dep_py_files:
+        args.add("--dep_py", f.path)
+    for f in ctx.files.docs:
+        args.add("--dep_doc", f.path)
     # Add any other necessary args: API endpoint, model name, maybe API key path?
     # SECURITY WARNING: Avoid passing API keys directly on the command line.
     # Use environment variables via ctx.actions.run(..., environments = ...)
@@ -36,7 +40,7 @@ def _natty_library_impl(ctx):
     args.add("--max_output_tokens", ctx.attr.max_output_tokens)
 
     # Define the inputs for the action
-    inputs = [input_txt] + dep_py_files + [ctx.executable._nattyc]
+    inputs = [input_txt] + dep_py_files + ctx.files.docs + [ctx.executable._nattyc]
     # If the caller script needs other files (e.g., config), add them too.
 
     # Define the action to run the LLM caller script
@@ -77,9 +81,17 @@ _natty_library_rule = rule(
             mandatory = True,
             doc = "The single textual file containing English behavior description.",
         ),
+        "package": attr.string(
+            mandatory = True,
+            doc = "The package that can be used to specify importing this generated file.",
+        ),
         "deps": attr.label_list(
             providers = [[NattyInfo]], # Dependents must provide VibeInfo
             doc = "List of other natty_library targets this target depends on.",
+        ),
+        "docs": attr.label_list(
+            allow_files=True,
+            doc = "Paths to documentation files to be fed to the LLM to aid codegen.",
         ),
         "llm_model": attr.string(
             default = "models/gemini-2.5-flash-preview-04-17",
@@ -109,8 +121,17 @@ _natty_library_rule = rule(
     doc = "Generates a Python library from Natural Language text using an LLM.",
 )
 
+def _get_python_import_str(name):
+    # Leveraging Bazel semantics to produce a unique module name from this target's Bazel package.
+    # If this target is declared as //src/com/foo/bar:my_module, then the unique_module_name will be set to
+    # 'src$com$foo$bar$my_module' which is guaranteed to be a name that's unique across this entire Bazel project.
+    unique_module_name = native.package_name().replace('/', '.') + '.' + name + "_codegen"
+    return unique_module_name
 
-def natty_library(name, src, deps = [], llm_model = None, visibility = None, tags = []):
+
+def natty_library(
+    name, src, deps = [], py_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
+):
     """
     User-facing macro to generate a Python library from English text.
 
@@ -130,8 +151,11 @@ def natty_library(name, src, deps = [], llm_model = None, visibility = None, tag
     _natty_library_rule(
         name = codegen_rule_name,
         src = src,
+        package = _get_python_import_str(name),
         deps = [dep + "_codegen" for dep in deps],
+        docs = docs,
         llm_model = llm_model, # Pass through optional model override
+        temperature = temperature,
         tags = tags + ["natty_codegen_internal"], # Add internal tag if desired
         visibility = visibility,
     )
@@ -144,12 +168,14 @@ def natty_library(name, src, deps = [], llm_model = None, visibility = None, tag
         # How should deps be handled?
         # Simple case: Assume py_library deps mirror vibe_library deps.
         # Complex case: You might need a separate `py_deps` attribute.
-        deps = deps,
+        deps = deps + py_deps,
         visibility = visibility,
         tags = tags,
     )
 
-def natty_binary(name, src, deps = [], llm_model = None, visibility = None, tags = []):
+def natty_binary(
+    name, src, deps = [], py_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
+):
     """
     User-facing macro to generate a Python library from English text.
 
@@ -169,8 +195,11 @@ def natty_binary(name, src, deps = [], llm_model = None, visibility = None, tags
     _natty_library_rule(
         name = codegen_rule_name,
         src = src,
+        package = _get_python_import_str(name),
         deps = [dep + "_codegen" for dep in deps],
+        docs = docs,
         llm_model = llm_model, # Pass through optional model override
+        temperature = temperature,
         tags = tags + ["natty_codegen_internal"], # Add internal tag if desired
         visibility = visibility,
     )
@@ -184,7 +213,7 @@ def natty_binary(name, src, deps = [], llm_model = None, visibility = None, tags
         # How should deps be handled?
         # Simple case: Assume py_library deps mirror vibe_library deps.
         # Complex case: You might need a separate `py_deps` attribute.
-        deps = deps,
+        deps = deps + py_deps,
         visibility = visibility,
         tags = tags,
     )
