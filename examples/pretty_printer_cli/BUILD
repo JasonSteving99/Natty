@@ -1,4 +1,10 @@
-load("//rules_natty:defs.bzl", "natty_binary", "natty_library")
+load(
+    "//rules_natty:defs.bzl", 
+    "natty_binary", 
+    "natty_library",
+    "natty_java_binary", 
+    "natty_java_library"
+)
 
 # Test out this Natty program using the following command:
 #
@@ -15,4 +21,15 @@ natty_library(
     name = "pretty_print",
     src = "pretty_print.md",
     visibility = ["//visibility:public"]
+)
+
+# Exact same as the above but codegen'ing Java.
+natty_java_binary( name = "java_cli_printer",
+    src = "cli_printer.md",
+    deps = [":java_pretty_print"],
+)
+
+natty_java_library(
+    name = "java_pretty_print",
+    src = "pretty_print.md",
 )

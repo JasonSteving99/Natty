@@ -3,7 +3,8 @@ load("@rules_python//python:defs.bzl", "py_binary", "py_library") # Creating a p
 """Provider for Natty library information."""
 NattyInfo = provider(
     fields = {
-        "generated_py_source": "The File object representing the generated Python source code.",
+        "generated_source": "The File object representing the generated source code.",
+        "language": "The programming language of the generated source code.",
     },
     doc = "Provides information about a Natty-generated library.",
 )
@@ -13,22 +14,25 @@ NattyInfo = provider(
 def _natty_library_impl(ctx):
     """Implementation of the natty_library rule."""
 
-    output_py = ctx.actions.declare_file(ctx.label.name + ".py")
+    language = ctx.attr.language
+    extension = ".java" if language == "java" else ".py"
+    output_file = ctx.actions.declare_file(ctx.label.name + extension)
     input_txt = ctx.file.src  # Assuming allow_single_file=True
 
-    # Collect generated Python sources from direct dependencies
-    dep_py_files = []
+    # Collect generated source files from direct dependencies
+    dep_files = []
     for dep in ctx.attr.deps:
         if NattyInfo in dep:
-            dep_py_files.append(dep[NattyInfo].generated_py_source)
+            dep_files.append(dep[NattyInfo].generated_source)
 
     # Prepare arguments for the LLM caller script
     args = ctx.actions.args()
     args.add("--input_txt", input_txt.path)
-    args.add("--output_py", output_py.path)
+    args.add("--output_file", output_file.path)
+    args.add("--language", language)
     args.add("--package", ctx.attr.package)
-    for f in dep_py_files:
-        args.add("--dep_py", f.path)
+    for f in dep_files:
+        args.add("--dep_file", f.path)
     for f in ctx.files.docs:
         args.add("--dep_doc", f.path)
     # Add any other necessary args: API endpoint, model name, maybe API key path?
@@ -40,7 +44,7 @@ def _natty_library_impl(ctx):
     args.add("--max_output_tokens", ctx.attr.max_output_tokens)
 
     # Define the inputs for the action
-    inputs = [input_txt] + dep_py_files + ctx.files.docs + [ctx.executable._nattyc]
+    inputs = [input_txt] + dep_files + ctx.files.docs + [ctx.executable._nattyc]
     # If the caller script needs other files (e.g., config), add them too.
 
     # Define the action to run the LLM caller script
@@ -48,8 +52,8 @@ def _natty_library_impl(ctx):
         executable = ctx.executable._nattyc,
         arguments = [args],
         inputs = depset(inputs), # Use depset for efficiency
-        outputs = [output_py],
-        progress_message = "Generating Python code for %s using Natty" % ctx.label,
+        outputs = [output_file],
+        progress_message = "Generating %s code for %s using Natty" % (language.capitalize(), ctx.label),
         mnemonic = "Natty",
         # WARNING: requires-network can disable sandboxing & affect caching/remote execution.
         execution_requirements = {"requires-network": "True"},
@@ -58,19 +62,11 @@ def _natty_library_impl(ctx):
     )
 
     # Return providers:
-    # - DefaultInfo: Makes the generated .py file the default output.
+    # - DefaultInfo: Makes the generated source file the default output.
     # - NattyInfo: Passes the generated source file to dependents.
-    # - PyInfo: (Optional but recommended) Makes this behave like a standard py_library
-    #           for other Bazel Python rules. Creating PyInfo correctly can be complex,
-    #           involving transitive sources, deps, etc. Start simple first.
     return [
-        DefaultInfo(files = depset([output_py])),
-        NattyInfo(generated_py_source = output_py),
-        # Simple PyInfo example (might need adjustment based on actual needs):
-        # PyInfo(
-        #     transitive_sources = depset([output_py], transitive = [dep[PyInfo].transitive_sources for dep in ctx.attr.deps if PyInfo in dep]),
-        #     # Forward deps if necessary, or handle imports within generated code.
-        # ),
+        DefaultInfo(files = depset([output_file])),
+        NattyInfo(generated_source = output_file, language = language),
     ]
 
 _natty_library_rule = rule(
@@ -81,12 +77,17 @@ _natty_library_rule = rule(
             mandatory = True,
             doc = "The single textual file containing English behavior description.",
         ),
+        "language": attr.string(
+            default = "python",
+            values = ["python", "java"],
+            doc = "The target programming language for code generation.",
+        ),
         "package": attr.string(
             mandatory = True,
             doc = "The package that can be used to specify importing this generated file.",
         ),
         "deps": attr.label_list(
-            providers = [[NattyInfo]], # Dependents must provide VibeInfo
+            providers = [[NattyInfo]], # Dependents must provide NattyInfo
             doc = "List of other natty_library targets this target depends on.",
         ),
         "docs": attr.label_list(
@@ -118,15 +119,35 @@ _natty_library_rule = rule(
         # but can be good practice. Bazel infers it from declare_file.
         # "py_output": "%{name}.py"
     },
-    doc = "Generates a Python library from Natural Language text using an LLM.",
+    doc = "Generates code in a specified language from Natural Language text using an LLM.",
 )
 
-def _get_python_import_str(name):
+def _get_import_str(name, language):
+    """
+    Create a language-appropriate package/module name for the generated code.
+    
+    Args:
+        name: The target name
+        language: The target programming language
+        
+    Returns:
+        String representing the package/module name
+    """
     # Leveraging Bazel semantics to produce a unique module name from this target's Bazel package.
     # If this target is declared as //src/com/foo/bar:my_module, then the unique_module_name will be set to
     # 'src$com$foo$bar$my_module' which is guaranteed to be a name that's unique across this entire Bazel project.
-    unique_module_name = native.package_name().replace('/', '.') + '.' + name + "_codegen"
-    return unique_module_name
+    package_name = native.package_name()
+    
+    if language == "python":
+        # Convert slashes to dots for Python module naming
+        unique_module_name = package_name.replace('/', '.') + '.' + name + "_codegen"
+        return unique_module_name
+    elif language == "java":
+        # Convert slashes to dots and create proper Java package naming
+        unique_package_name = package_name.replace('/', '.')
+        return unique_package_name
+    else:
+        fail("Unsupported language: " + language)
 
 
 def natty_library(
@@ -137,9 +158,12 @@ def natty_library(
 
     Args:
       name: The name of the target.
-      src: The single .txt file with the English description.
-      deps: List of other vibe_library targets this depends on.
+      src: The single .txt or .md file with the English description.
+      deps: List of other natty_library targets this depends on.
+      py_deps: Additional Python library dependencies.
+      docs: Documentation files to provide to the LLM for context.
       llm_model: Optional; overrides the default LLM model.
+      temperature: Optional; overrides the default sampling temperature.
       visibility: Standard Bazel visibility.
       tags: Standard Bazel tags.
     """
@@ -151,7 +175,8 @@ def natty_library(
     _natty_library_rule(
         name = codegen_rule_name,
         src = src,
-        package = _get_python_import_str(name),
+        language = "python",  # Fixed to Python for this macro
+        package = _get_import_str(name, "python"),
         deps = [dep + "_codegen" for dep in deps],
         docs = docs,
         llm_model = llm_model, # Pass through optional model override
@@ -165,9 +190,6 @@ def natty_library(
     py_library(
         name = name,
         srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
-        # How should deps be handled?
-        # Simple case: Assume py_library deps mirror vibe_library deps.
-        # Complex case: You might need a separate `py_deps` attribute.
         deps = deps + py_deps,
         visibility = visibility,
         tags = tags,
@@ -177,13 +199,16 @@ def natty_binary(
     name, src, deps = [], py_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
 ):
     """
-    User-facing macro to generate a Python library from English text.
+    User-facing macro to generate a Python binary executable from English text.
 
     Args:
       name: The name of the target.
-      src: The single .txt file with the English description.
-      deps: List of other vibe_library targets this depends on.
+      src: The single .txt or .md file with the English description.
+      deps: List of other natty_library targets this depends on.
+      py_deps: Additional Python library dependencies.
+      docs: Documentation files to provide to the LLM for context.
       llm_model: Optional; overrides the default LLM model.
+      temperature: Optional; overrides the default sampling temperature.
       visibility: Standard Bazel visibility.
       tags: Standard Bazel tags.
     """
@@ -195,7 +220,8 @@ def natty_binary(
     _natty_library_rule(
         name = codegen_rule_name,
         src = src,
-        package = _get_python_import_str(name),
+        language = "python",  # Fixed to Python for this macro
+        package = _get_import_str(name, "python"),
         deps = [dep + "_codegen" for dep in deps],
         docs = docs,
         llm_model = llm_model, # Pass through optional model override
@@ -204,16 +230,111 @@ def natty_binary(
         visibility = visibility,
     )
 
-    # Wrap the output in a standard py_library (better integration)
-    # This makes `:my_vibe_lib` directly consumable as a Python dependency.
+    # Wrap the output in a standard py_binary for execution
     py_binary(
         name = name,
         srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
         main = ":" + codegen_rule_name + ".py",
-        # How should deps be handled?
-        # Simple case: Assume py_library deps mirror vibe_library deps.
-        # Complex case: You might need a separate `py_deps` attribute.
         deps = deps + py_deps,
+        visibility = visibility,
+        tags = tags,
+    )
+
+def natty_java_library(
+    name, src, deps = [], java_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
+):
+    """
+    User-facing macro to generate a Java library from English text.
+
+    Args:
+      name: The name of the target.
+      src: The single .txt or .md file with the English description.
+      deps: List of other natty_java_library targets this depends on.
+      java_deps: Additional Java library dependencies.
+      docs: Documentation files to provide to the LLM for context.
+      llm_model: Optional; overrides the default LLM model.
+      temperature: Optional; overrides the default sampling temperature.
+      visibility: Standard Bazel visibility.
+      tags: Standard Bazel tags.
+    """
+
+    # Define the name for the internal code generation rule
+    codegen_rule_name = name + "_codegen"
+
+    # Call the internal rule to perform the code generation
+    _natty_library_rule(
+        name = codegen_rule_name,
+        src = src,
+        language = "java",  # Fixed to Java for this macro
+        package = _get_import_str(name, "java"),
+        deps = [dep + "_codegen" for dep in deps],
+        docs = docs,
+        llm_model = llm_model, # Pass through optional model override
+        temperature = temperature,
+        tags = tags + ["natty_codegen_internal"], # Add internal tag if desired
+        visibility = visibility,
+    )
+
+    # Wrap the output in a standard java_library
+    native.java_library(
+        name = name,
+        srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
+        deps = deps + java_deps,
+        visibility = visibility,
+        tags = tags,
+    )
+
+def natty_java_binary(
+    name, src, deps = [], java_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
+    main_class = None,
+):
+    """
+    User-facing macro to generate a Java binary executable from English text.
+
+    Args:
+      name: The name of the target.
+      src: The single .txt or .md file with the English description.
+      deps: List of other natty_java_library targets this depends on.
+      java_deps: Additional Java library dependencies.
+      docs: Documentation files to provide to the LLM for context.
+      main_class: The main class to execute (if not specified, will be determined from the generated code).
+      llm_model: Optional; overrides the default LLM model.
+      temperature: Optional; overrides the default sampling temperature.
+      visibility: Standard Bazel visibility.
+      tags: Standard Bazel tags.
+    """
+
+    # Define the name for the internal code generation rule
+    codegen_rule_name = name + "_codegen"
+
+    # Call the internal rule to perform the code generation
+    _natty_library_rule(
+        name = codegen_rule_name,
+        src = src,
+        language = "java",  # Fixed to Java for this macro
+        package = _get_import_str(name, "java"),
+        deps = [dep + "_codegen" for dep in deps],
+        docs = docs,
+        llm_model = llm_model, # Pass through optional model override
+        temperature = temperature,
+        tags = tags + ["natty_codegen_internal"], # Add internal tag if desired
+        visibility = visibility,
+    )
+
+    # Determine main class if not provided
+    if main_class == None:
+        # Default to package.ClassName format based on natty's naming convention
+        java_package = _get_import_str(name, "java")
+        # Extract class name from the end of the name (capitalize first letter)
+        class_name = name + "_codegen"
+        main_class = java_package + "." + class_name
+
+    # Wrap the output in a standard java_binary for execution
+    native.java_binary(
+        name = name,
+        srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
+        main_class = main_class,
+        deps = deps + java_deps,
         visibility = visibility,
         tags = tags,
     )
