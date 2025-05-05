@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,7 +140,7 @@ This package declaration is required by the Java compiler and must exactly match
 
         requirements = f"""
 Requirements for the generated code:
-1. Use Java 11 or newer features when appropriate
+1. Use Java 8 features when appropriate
 2. Include proper exception handling
 3. Add JavaDoc comments for all classes, methods, and fields
 4. Follow Java naming conventions (camelCase for variables/methods, PascalCase for classes){class_instruction}{package_instruction}
@@ -251,12 +252,19 @@ async def call_llm(
         raise RuntimeError(f"Failed to generate code: {str(e)}")
 
 
-def validate_generated_code(code: str, language: Language) -> bool:
+def validate_generated_code(
+    code: str,
+    language: Language,
+    output_file: Path | None = None,
+    java_dep_jars: list[Path] = [],
+) -> bool:
     """Basic validation of generated code.
 
     Args:
         code: The generated code to validate
         language: The programming language of the code
+        output_file: The path where the code has been written for Java compilation
+        java_dep_jars: List of jar files needed for Java compilation
 
     Returns:
         True if validation passes, False otherwise
@@ -273,9 +281,49 @@ def validate_generated_code(code: str, language: Language) -> bool:
         except SyntaxError:
             return False
     elif language == Language.JAVA:
-        # TODO: Use javac for proper Java syntax validation when available
-        # For now, basic validation for Java - just check if it contains class definition
-        return "class " in code or "interface " in code or "enum " in code
+        # First, basic validation to catch obvious issues
+        if not ("class " in code or "interface " in code or "enum " in code):
+            return False
+
+        # For proper Java syntax validation, we'll compile the code with javac
+        if output_file:
+            try:
+                # Construct the javac command
+                cmd = ["javac", output_file.as_posix()]
+
+                # Add classpath with dependencies if provided
+                if java_dep_jars:
+                    classpath = ":".join(jar.as_posix() for jar in java_dep_jars)
+                    cmd.extend(["-classpath", classpath])
+
+                # Run the javac command
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    text=True,
+                )
+
+                # If compilation failed, log the errors
+                if result.returncode != 0:
+                    logging.error(
+                        f"Java compilation failed with exit code {result.returncode}"
+                    )
+                    logging.error(f"Compilation command: {' '.join(cmd)}")
+                    if result.stdout:
+                        logging.error(f"Compiler stdout: {result.stdout}")
+                    if result.stderr:
+                        logging.error(f"Compiler stderr: {result.stderr}")
+
+                return result.returncode == 0
+            except Exception as e:
+                # If any exception occurs during compilation, log it and return False
+                logging.error(f"Error during Java compilation: {str(e)}")
+                return False
+        else:
+            # Fallback to basic validation if no output file is provided
+            return "class " in code or "interface " in code or "enum " in code
     else:
         raise ValueError(f"Unsupported language: {language}")
 
@@ -364,6 +412,20 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
     help="Paths to documentation files to be fed to the LLM to aid codegen.",
 )
 @click.option(
+    "--java_dep_jar",
+    multiple=True,
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        path_type=Path,
+        resolve_path=True,
+        readable=True,
+    ),
+    default=[],
+    help="Paths to Java dependency jar files needed for compilation.",
+)
+@click.option(
     "--llm_model", required=True, help="LLM model name (e.g., gemini-2.0-flash-001)"
 )
 @click.option(
@@ -384,6 +446,7 @@ async def main(
     package: str,
     dep_file: list[Path],
     dep_doc: list[Path],
+    java_dep_jar: list[Path],
     llm_model: str,
     temperature: float,
     max_output_tokens: int,
@@ -429,14 +492,8 @@ async def main(
             max_output_tokens=max_output_tokens,
         )
 
-        # Validate the generated code
-        if not validate_generated_code(response.text, language):
-            logger.error(
-                f"Generated code failed validation. Generated code:\n\n{response.text}"
-            )
-            sys.exit(1)
-
-        # Write the output with appropriate language-specific header
+        # Write the output with appropriate language-specific header first
+        # This ensures the file exists for Java compilation validation
         with open(output_file, "w") as f:
             if language == Language.PYTHON:
                 f.write("# Usage: Import from this package using the following:\n")
@@ -444,6 +501,24 @@ async def main(
             # For Java, we don't need to add a comment about the package,
             # as the package declaration should already be in the generated code
             f.write(response.text)
+
+        # Now validate the generated code
+        if language == Language.JAVA:
+            # For Java, pass the output file and jar dependencies for proper compilation
+            if not validate_generated_code(
+                response.text, language, output_file, java_dep_jar
+            ):
+                logger.error(
+                    f"Generated Java code failed validation/compilation. Generated code:\n\n{response.text}"
+                )
+                sys.exit(1)
+        else:
+            # For Python, we can validate without the file
+            if not validate_generated_code(response.text, language):
+                logger.error(
+                    f"Generated code failed validation. Generated code:\n\n{response.text}"
+                )
+                sys.exit(1)
 
         # Log success message with usage stats
         logger.info(f"Successfully generated {output_file}")

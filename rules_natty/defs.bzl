@@ -1,5 +1,8 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library") # Creating a py_library wrapper
 
+
+load("@rules_java//java:defs.bzl", "JavaInfo")
+
 """Provider for Natty library information."""
 NattyInfo = provider(
     fields = {
@@ -42,9 +45,23 @@ def _natty_library_impl(ctx):
     args.add("--llm_model", ctx.attr.llm_model)
     args.add("--temperature", ctx.attr.temperature)
     args.add("--max_output_tokens", ctx.attr.max_output_tokens)
+    
+    # If the language is Java, pass Java dependency jars for compilation
+    if language == "java":
+        # Collect paths to the jar files of dependencies
+        java_dep_jars = []
+        for dep in ctx.attr.java_deps:
+            if JavaInfo in dep:
+                for jar in dep[JavaInfo].compile_jars.to_list():
+                    args.add("--java_dep_jar", jar.path)
+                    java_dep_jars.append(jar)
 
     # Define the inputs for the action
     inputs = [input_txt] + dep_files + ctx.files.docs + [ctx.executable._nattyc]
+    
+    # If we're dealing with Java, add jar files to inputs
+    if language == "java":
+        inputs.extend([jar for dep in ctx.attr.java_deps if JavaInfo in dep for jar in dep[JavaInfo].compile_jars.to_list()])
     # If the caller script needs other files (e.g., config), add them too.
 
     # Define the action to run the LLM caller script
@@ -58,6 +75,8 @@ def _natty_library_impl(ctx):
         # WARNING: requires-network can disable sandboxing & affect caching/remote execution.
         execution_requirements = {"requires-network": "True"},
         # Enable LLM_API_KEY env var to be passed along to nattyc via --action_env=LLM_API_KEY=foo
+        # Also allows the javac command installed on the machine to be used rather than Bazel's
+        # builtin javac toolchain. TODO! Make this use the hermetic javac toolchain.
         use_default_shell_env = True,
     )
 
@@ -89,6 +108,9 @@ _natty_library_rule = rule(
         "deps": attr.label_list(
             providers = [[NattyInfo]], # Dependents must provide NattyInfo
             doc = "List of other natty_library targets this target depends on.",
+        ),
+        "java_deps": attr.label_list(
+            doc = "List of Java library dependencies (jar files) used for Java compilation.",
         ),
         "docs": attr.label_list(
             allow_files=True,
@@ -268,6 +290,7 @@ def natty_java_library(
         language = "java",  # Fixed to Java for this macro
         package = _get_import_str(name, "java"),
         deps = [dep + "_codegen" for dep in deps],
+        java_deps = deps + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
         llm_model = llm_model, # Pass through optional model override
         temperature = temperature,
@@ -314,6 +337,7 @@ def natty_java_binary(
         language = "java",  # Fixed to Java for this macro
         package = _get_import_str(name, "java"),
         deps = [dep + "_codegen" for dep in deps],
+        java_deps = deps + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
         llm_model = llm_model, # Pass through optional model override
         temperature = temperature,
