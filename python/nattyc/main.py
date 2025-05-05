@@ -37,6 +37,13 @@ class GeneratedCode(BaseModel):
     )
 
 
+class Language(str):
+    """Enum-like class for supported programming languages."""
+
+    PYTHON = "python"
+    JAVA = "java"
+
+
 def setup_logging(level: int = logging.INFO) -> None:
     """Set up logging configuration.
 
@@ -51,28 +58,42 @@ def setup_logging(level: int = logging.INFO) -> None:
 
 
 def construct_system_prompt(
-    dep_py_contents: dict[str, str],
+    language: Language,
+    dep_files_contents: dict[str, str],
     dep_doc_contents: dict[str, str],
+    output_file: Path,
+    package: str,
 ) -> str:
     """Constructs the system prompt for the LLM.
 
     Args:
-        dep_py_contents: Dictionary mapping dependency names to their code contents
+        language: The target programming language
+        dep_files_contents: Dictionary mapping dependency names to their code contents
         dep_doc_contents: Dictionary mapping documentation names to their contents
+        output_file: The output file path, needed for Java to enforce class naming conventions
 
     Returns:
         A formatted system prompt string for the LLM
     """
     dependencies_section = ""
-    if dep_py_contents:
-        dependencies_section += """
+    if dep_files_contents:
+        if language == Language.PYTHON:
+            dependencies_section += """
 
 The following Python code snippets are dependencies that can be used in the generated implementation. 
 DO NOT DUPLICATE THE CODE IN THESE DEPENDENCIES. 
 Ensure the generated code correctly interacts with them via import statements if necessary:
 
 """
-        for name, content in dep_py_contents.items():
+        elif language == Language.JAVA:
+            dependencies_section += """
+
+The following Java code snippets are dependencies that can be used in the generated implementation. 
+DO NOT DUPLICATE THE CODE IN THESE DEPENDENCIES. 
+Ensure the generated code correctly interacts with them via import statements if necessary:
+
+"""
+        for name, content in dep_files_contents.items():
             dependencies_section += f"# Dependency: {name}\n{content}\n---\n"
 
     documentation_section = ""
@@ -86,9 +107,10 @@ documentation includes necessary information for correct implementation:
         for name, content in dep_doc_contents.items():
             documentation_section += f"# Documentation: {name}\n{content}\n---\n"
 
-    # Emphasize quality requirements
-    return f"""You are a helpful assistant that translates English descriptions into Python code.{dependencies_section}{documentation_section}
-
+    # Choose language-specific requirements
+    if language == Language.PYTHON:
+        lang_intro = "You are a helpful assistant that translates English descriptions into Python code."
+        requirements = """
 Requirements for the generated code:
 1. Add proper type hints to all functions and variables
 2. Use Python 3.10+ syntax (e.g., use `list[str]` instead of `List[str]`)
@@ -99,6 +121,37 @@ Requirements for the generated code:
 
 Generate Python code for the natural language description the user will provide.
 """
+    elif language == Language.JAVA:
+        lang_intro = "You are a helpful assistant that translates English descriptions into Java code."
+
+        # Extract the base filename without extension for Java class naming
+        class_name = output_file.stem
+        class_instruction = f"""
+CRITICAL: You MUST name the primary public class '{class_name}' to match the output file name. 
+This is a strict Java requirement when the class is defined in a file named '{class_name}.java'.
+"""
+
+        # Add package instruction - package is the Bazel package path relative to workspace root
+        package_instruction = f"""
+CRITICAL: The Java code MUST start with 'package {package};' as the first line of the file (after any comments).
+This package declaration is required by the Java compiler and must exactly match the Bazel workspace path.
+"""
+
+        requirements = f"""
+Requirements for the generated code:
+1. Use Java 11 or newer features when appropriate
+2. Include proper exception handling
+3. Add JavaDoc comments for all classes, methods, and fields
+4. Follow Java naming conventions (camelCase for variables/methods, PascalCase for classes){class_instruction}{package_instruction}
+5. Ensure imports come after the package declaration
+6. Ensure the code is well-structured and follows best practices
+
+Generate Java code for the natural language description the user will provide.
+"""
+    else:
+        raise ValueError(f"Unsupported language: {language}")
+
+    return f"{lang_intro}{dependencies_section}{documentation_section}{requirements}"
 
 
 async def call_llm(
@@ -198,11 +251,12 @@ async def call_llm(
         raise RuntimeError(f"Failed to generate code: {str(e)}")
 
 
-def validate_generated_code(code: str) -> bool:
-    """Basic validation of generated Python code.
+def validate_generated_code(code: str, language: Language) -> bool:
+    """Basic validation of generated code.
 
     Args:
-        code: The generated Python code to validate
+        code: The generated code to validate
+        language: The programming language of the code
 
     Returns:
         True if validation passes, False otherwise
@@ -211,33 +265,40 @@ def validate_generated_code(code: str) -> bool:
     if not code.strip():
         return False
 
-    # Check if it compiles
-    try:
-        compile(code, "<string>", "exec")
-        return True
-    except SyntaxError:
-        return False
+    if language == Language.PYTHON:
+        # Check if Python code compiles
+        try:
+            compile(code, "<string>", "exec")
+            return True
+        except SyntaxError:
+            return False
+    elif language == Language.JAVA:
+        # TODO: Use javac for proper Java syntax validation when available
+        # For now, basic validation for Java - just check if it contains class definition
+        return "class " in code or "interface " in code or "enum " in code
+    else:
+        raise ValueError(f"Unsupported language: {language}")
 
 
 def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
-    """Read all dependency Python files.
+    """Read all dependency files.
 
     Args:
-        dep_paths: List of paths to dependency Python files
+        dep_paths: List of paths to dependency files
 
     Returns:
         Dictionary mapping dependency names to their code contents
     """
-    dep_py_contents: Dict[str, str] = {}
+    dep_contents: Dict[str, str] = {}
 
     for dep_path in dep_paths:
         dep_name = dep_path.as_posix()
-        dep_py_contents[dep_name] = dep_path.read_text()
+        dep_contents[dep_name] = dep_path.read_text()
 
-    return dep_py_contents
+    return dep_contents
 
 
-@click.command(help="Generate Python code from English descriptions using LLMs")
+@click.command(help="Generate code from English descriptions using LLMs")
 @click.option(
     "--input_txt",
     type=click.Path(
@@ -252,7 +313,7 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
     help="Path to input text description file",
 )
 @click.option(
-    "--output_py",
+    "--output_file",
     type=click.Path(
         file_okay=True,
         dir_okay=False,
@@ -261,7 +322,13 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
         writable=True,
     ),
     required=True,
-    help="Path to output Python file",
+    help="Path to output code file",
+)
+@click.option(
+    "--language",
+    type=click.Choice([Language.PYTHON, Language.JAVA]),
+    default=Language.PYTHON,
+    help="Target programming language",
 )
 @click.option(
     "--package",
@@ -269,7 +336,7 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
     help="The package that can be used to specify importing this generated file.",
 )
 @click.option(
-    "--dep_py",
+    "--dep_file",
     multiple=True,
     type=click.Path(
         exists=True,
@@ -280,7 +347,7 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
         readable=True,
     ),
     default=[],
-    help="Paths to dependency Python files",
+    help="Paths to dependency code files",
 )
 @click.option(
     "--dep_doc",
@@ -312,9 +379,10 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
 )
 async def main(
     input_txt: Path,
-    output_py: Path,
+    output_file: Path,
+    language: Language,
     package: str,
-    dep_py: list[Path],
+    dep_file: list[Path],
     dep_doc: list[Path],
     llm_model: str,
     temperature: float,
@@ -330,15 +398,19 @@ async def main(
         # Read input English text
         english_text = input_txt.read_text()
 
-        # Read dependency Python code
-        dep_py_contents = read_dependencies(dep_py)
+        # Read dependency code files
+        dep_files_contents = read_dependencies(dep_file)
 
-        # Read docs to seed the LLM with context.
+        # Read docs to seed the LLM with context
         dep_docs_contents = read_dependencies(dep_doc)
 
         # Construct the prompt
         system_prompt = construct_system_prompt(
-            dep_py_contents=dep_py_contents, dep_doc_contents=dep_docs_contents
+            language=language,
+            dep_files_contents=dep_files_contents,
+            dep_doc_contents=dep_docs_contents,
+            output_file=output_file,
+            package=package,
         )
 
         # Get API Key
@@ -358,20 +430,23 @@ async def main(
         )
 
         # Validate the generated code
-        if not validate_generated_code(response.text):
+        if not validate_generated_code(response.text, language):
             logger.error(
                 f"Generated code failed validation. Generated code:\n\n{response.text}"
             )
             sys.exit(1)
 
-        # Write the output
-        with open(output_py, "w") as f:
-            f.write("# Usage: Import from this package using the following:\n")
-            f.write(f"# from {package} import <name to import>\n\n")
+        # Write the output with appropriate language-specific header
+        with open(output_file, "w") as f:
+            if language == Language.PYTHON:
+                f.write("# Usage: Import from this package using the following:\n")
+                f.write(f"# from {package} import <name to import>\n\n")
+            # For Java, we don't need to add a comment about the package,
+            # as the package declaration should already be in the generated code
             f.write(response.text)
 
         # Log success message with usage stats
-        logger.info(f"Successfully generated {output_py}")
+        logger.info(f"Successfully generated {output_file}")
         logger.info(f"Usage stats: {json.dumps(response.usage)}")
 
     except Exception as e:
