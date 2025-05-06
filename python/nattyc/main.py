@@ -31,6 +31,14 @@ class LlmResponse:
     finish_reason: str | None
 
 
+@dataclass
+class ValidationResult:
+    """Data class to hold validation result."""
+
+    is_valid: bool
+    error_message: str | None = None
+
+
 class GeneratedCode(BaseModel):
     reasoning: str = Field(description="Use this field to plan out your solution.")
     generated_code: str = Field(
@@ -257,7 +265,7 @@ def validate_generated_code(
     language: Language,
     output_file: Path | None = None,
     java_dep_jars: list[Path] = [],
-) -> bool:
+) -> ValidationResult:
     """Basic validation of generated code.
 
     Args:
@@ -267,23 +275,30 @@ def validate_generated_code(
         java_dep_jars: List of jar files needed for Java compilation
 
     Returns:
-        True if validation passes, False otherwise
+        ValidationResult containing validity and any error message
     """
     # Check if the code is empty
     if not code.strip():
-        return False
+        return ValidationResult(
+            is_valid=False, error_message="Generated code is empty."
+        )
 
     if language == Language.PYTHON:
         # Check if Python code compiles
         try:
             compile(code, "<string>", "exec")
-            return True
-        except SyntaxError:
-            return False
+            return ValidationResult(is_valid=True)
+        except SyntaxError as e:
+            return ValidationResult(
+                is_valid=False, error_message=f"Python syntax error: {str(e)}"
+            )
     elif language == Language.JAVA:
         # First, basic validation to catch obvious issues
         if not ("class " in code or "interface " in code or "enum " in code):
-            return False
+            return ValidationResult(
+                is_valid=False,
+                error_message="Java code must contain at least one class, interface, or enum.",
+            )
 
         # For proper Java syntax validation, we'll compile the code with javac
         if output_file:
@@ -305,25 +320,37 @@ def validate_generated_code(
                     text=True,
                 )
 
-                # If compilation failed, log the errors
+                # If compilation failed, capture the errors
                 if result.returncode != 0:
+                    error_message = "Java compilation failed:\n"
+                    if result.stdout:
+                        error_message += f"Compiler stdout: {result.stdout}\n"
+                    if result.stderr:
+                        error_message += f"Compiler stderr: {result.stderr}"
+
                     logging.error(
                         f"Java compilation failed with exit code {result.returncode}"
                     )
                     logging.error(f"Compilation command: {' '.join(cmd)}")
-                    if result.stdout:
-                        logging.error(f"Compiler stdout: {result.stdout}")
-                    if result.stderr:
-                        logging.error(f"Compiler stderr: {result.stderr}")
+                    logging.error(error_message)
 
-                return result.returncode == 0
+                    return ValidationResult(is_valid=False, error_message=error_message)
+
+                return ValidationResult(is_valid=True)
             except Exception as e:
-                # If any exception occurs during compilation, log it and return False
-                logging.error(f"Error during Java compilation: {str(e)}")
-                return False
+                # If any exception occurs during compilation, log it and return with error
+                error_message = f"Error during Java compilation: {str(e)}"
+                logging.error(error_message)
+                return ValidationResult(is_valid=False, error_message=error_message)
         else:
             # Fallback to basic validation if no output file is provided
-            return "class " in code or "interface " in code or "enum " in code
+            if "class " in code or "interface " in code or "enum " in code:
+                return ValidationResult(is_valid=True)
+            else:
+                return ValidationResult(
+                    is_valid=False,
+                    error_message="Java code must contain at least one class, interface, or enum.",
+                )
     else:
         raise ValueError(f"Unsupported language: {language}")
 
@@ -482,47 +509,83 @@ async def main(
             logger.error(f"Error: {api_key_env_var} environment variable not set.")
             sys.exit(1)
 
-        # Call the LLM
-        response = await call_llm(
-            system_prompt=system_prompt,
-            english_description=english_text,
-            model_name=llm_model,
-            api_key=api_key,
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-        )
+        # Initialize variables for retry loop
+        max_retries = 3
+        retries = 0
+        success = False
+        validation_result = None
+        response = None
 
-        # Write the output with appropriate language-specific header first
-        # This ensures the file exists for Java compilation validation
-        with open(output_file, "w") as f:
-            if language == Language.PYTHON:
-                f.write("# Usage: Import from this package using the following:\n")
-                f.write(f"# from {package} import <name to import>\n\n")
-            # For Java, we don't need to add a comment about the package,
-            # as the package declaration should already be in the generated code
-            f.write(response.text)
+        while retries <= max_retries:
+            # Call the LLM
+            response = await call_llm(
+                system_prompt=system_prompt,
+                english_description=english_text,
+                model_name=llm_model,
+                api_key=api_key,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+            )
 
-        # Now validate the generated code
-        if language == Language.JAVA:
-            # For Java, pass the output file and jar dependencies for proper compilation
-            if not validate_generated_code(
-                response.text, language, output_file, java_dep_jar
-            ):
-                logger.error(
-                    f"Generated Java code failed validation/compilation. Generated code:\n\n{response.text}"
+            # Write the output with appropriate language-specific header
+            # This ensures the file exists for Java compilation validation
+            with open(output_file, "w") as f:
+                if language == Language.PYTHON:
+                    f.write("# Usage: Import from this package using the following:\n")
+                    f.write(f"# from {package} import <name to import>\n\n")
+                # For Java, the package declaration should already be in the code
+                f.write(response.text)
+
+            # Validate the generated code
+            if language == Language.JAVA:
+                # For Java, pass the output file and jar dependencies for proper compilation
+                validation_result = validate_generated_code(
+                    response.text, language, output_file, java_dep_jar
                 )
-                sys.exit(1)
+            else:
+                # For Python, we can validate without the file
+                validation_result = validate_generated_code(response.text, language)
+
+            # If validation passed, mark as success and break out of the retry loop
+            if validation_result.is_valid:
+                success = True
+                break
+
+            # Increment retry counter and log retry attempt
+            retries += 1
+            logger.info(f"Validation failed. Retry {retries}/{max_retries}...")
+
+            # If we still have retries left, update the system prompt with error feedback
+            if retries < max_retries:
+                error_feedback = f"""
+
+IMPORTANT: Your previous attempt at generating code failed validation with the following error:
+
+{validation_result.error_message}
+
+Here is your previous code that needs to be fixed:
+
+```
+{response.text}
+```
+
+Please fix the issues and provide a COMPLETE implementation of the code, not just the changes.
+Make sure your code handles the errors mentioned above.
+"""
+                # Update system prompt with error feedback for retry
+                system_prompt = system_prompt + error_feedback
+
+        # After the loop, check if we succeeded or exhausted all retries
+        if success:
+            # Log success message with usage stats
+            logger.info(f"Successfully generated {output_file}")
+            logger.info(f"Usage stats: {json.dumps(response.usage)}")
         else:
-            # For Python, we can validate without the file
-            if not validate_generated_code(response.text, language):
-                logger.error(
-                    f"Generated code failed validation. Generated code:\n\n{response.text}"
-                )
-                sys.exit(1)
-
-        # Log success message with usage stats
-        logger.info(f"Successfully generated {output_file}")
-        logger.info(f"Usage stats: {json.dumps(response.usage)}")
+            # Log the final error and exit with failure
+            logger.error(
+                f"Generated code failed validation after {max_retries} attempts. Last error: {validation_result.error_message}"
+            )
+            sys.exit(1)
 
     except Exception as e:
         logger.error(f"Error: {str(e)}")
