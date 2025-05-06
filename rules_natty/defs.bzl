@@ -263,7 +263,7 @@ def natty_binary(
     )
 
 def natty_java_library(
-    name, src, deps = [], java_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
+    name, src, deps = [], java_deps = [], docs = [], max_output_tokens = None, llm_model = None, temperature = None, visibility = None, tags = [],
 ):
     """
     User-facing macro to generate a Java library from English text.
@@ -292,6 +292,7 @@ def natty_java_library(
         deps = [dep + "_codegen" for dep in deps],
         java_deps = deps + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
+        max_output_tokens = max_output_tokens,
         llm_model = llm_model, # Pass through optional model override
         temperature = temperature,
         tags = tags + ["natty_codegen_internal"], # Add internal tag if desired
@@ -303,12 +304,14 @@ def natty_java_library(
         name = name,
         srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
         deps = deps + java_deps,
+        # Disable ErrorProne for now unless/until I'm able to run ErrorProne during the codegen verification loop.
+        javacopts = ["-XepDisableAllChecks"],
         visibility = visibility,
         tags = tags,
     )
 
 def natty_java_binary(
-    name, src, deps = [], java_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
+    name, src, deps = [], java_deps = [], docs = [], max_output_tokens = None, llm_model = None, temperature = None, visibility = None, tags = [],
     main_class = None,
 ):
     """
@@ -339,6 +342,7 @@ def natty_java_binary(
         deps = [dep + "_codegen" for dep in deps],
         java_deps = deps + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
+        max_output_tokens = max_output_tokens,
         llm_model = llm_model, # Pass through optional model override
         temperature = temperature,
         tags = tags + ["natty_codegen_internal"], # Add internal tag if desired
@@ -359,6 +363,8 @@ def natty_java_binary(
         srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
         main_class = main_class,
         deps = deps + java_deps,
+        # Disable ErrorProne for now unless/until I'm able to run ErrorProne during the codegen verification loop.
+        javacopts = ["-XepDisableAllChecks"],
         visibility = visibility,
         tags = tags,
     )
