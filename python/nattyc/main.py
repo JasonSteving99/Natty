@@ -6,7 +6,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, cast
+from typing import Dict, List, Literal, cast
 
 import asyncclick as click
 
@@ -72,6 +72,8 @@ def construct_system_prompt(
     dep_doc_contents: dict[str, str],
     output_file: Path,
     package: str,
+    resource_files: list[Path] = [],
+    target_type: Literal["library", "binary"] = "library",
 ) -> str:
     """Constructs the system prompt for the LLM.
 
@@ -80,6 +82,9 @@ def construct_system_prompt(
         dep_files_contents: Dictionary mapping dependency names to their code contents
         dep_doc_contents: Dictionary mapping documentation names to their contents
         output_file: The output file path, needed for Java to enforce class naming conventions
+        package: The package that can be used for importing the generated file
+        resource_files: List of resource files that will be available to the generated program
+        target_type: Whether this is a "library" or "binary" target
 
     Returns:
         A formatted system prompt string for the LLM
@@ -116,17 +121,46 @@ documentation includes necessary information for correct implementation:
         for name, content in dep_doc_contents.items():
             documentation_section += f"# Documentation: {name}\n{content}\n---\n"
 
+    resource_files_section = ""
+    if resource_files:
+        resource_files_section += """
+
+The following resource files will be available to the generated program:
+
+"""
+        for resource_path in resource_files:
+            resource_name = resource_path.name
+            resource_files_section += f"# Resource file: {resource_name}\n"
+
     # Choose language-specific requirements
     if language == Language.PYTHON:
         lang_intro = "You are a helpful assistant that translates English descriptions into Python code."
-        requirements = """
+
+        resource_instruction = ""
+        if resource_files:
+            resource_instruction = """
+CRITICAL: When accessing resource files, you should read them using appropriate file handling methods.
+The following resource files are available:
+
+"""
+            for resource_path in resource_files:
+                resource_instruction += f"- {str(resource_path)}\n"
+
+        # Add specific instructions based on target type
+        binary_instruction = ""
+        if target_type == "binary":
+            binary_instruction = """
+CRITICAL: You MUST create an executable Python program with a `if __name__ == "__main__":` block.
+"""
+
+        requirements = f"""
 Requirements for the generated code:
 1. Add proper type hints to all functions and variables
 2. Use Python 3.10+ syntax (e.g., use `list[str]` instead of `List[str]`)
 3. Use union syntax in Python types (e.g., `str | None` instead of `Optional[str]`)
 4. Include docstrings for all functions and classes
 5. Add appropriate error handling
-6. Ensure the code is well-structured and follows best practices
+6. Ensure the code is well-structured and follows best practices{resource_instruction}{binary_instruction}
 
 Generate Python code for the natural language description the user will provide.
 """
@@ -146,6 +180,23 @@ CRITICAL: The Java code MUST start with 'package {package};' as the first line o
 This package declaration is required by the Java compiler and must exactly match the Bazel workspace path.
 """
 
+        resource_instruction = ""
+        if resource_files:
+            resource_instruction = """
+CRITICAL: When accessing resource files, you MUST use the following method to load each resource as an InputStream:
+
+"""
+            for resource_path in resource_files:
+                resource_instruction += f"For resource '{str(resource_path)}', use:\nInputStream is = {class_name}.class.getResourceAsStream(\"/{str(resource_path)}\");\n\n"
+
+        # Add specific instructions based on target type
+        binary_instruction = ""
+        if target_type == "binary":
+            binary_instruction = f"""
+CRITICAL: This is a Java executable. Your code MUST include a `public static void main(String[] args)` method in the {class_name} class.
+The main method should serve as the entry point for the program and provide complete functionality for a standalone application.
+"""
+
         requirements = f"""
 Requirements for the generated code:
 1. Use Java 8 features when appropriate
@@ -153,14 +204,14 @@ Requirements for the generated code:
 3. Add JavaDoc comments for all classes, methods, and fields
 4. Follow Java naming conventions (camelCase for variables/methods, PascalCase for classes){class_instruction}{package_instruction}
 5. Ensure imports come after the package declaration
-6. Ensure the code is well-structured and follows best practices
+6. Ensure the code is well-structured and follows best practices{resource_instruction}{binary_instruction}
 
 Generate Java code for the natural language description the user will provide.
 """
     else:
         raise ValueError(f"Unsupported language: {language}")
 
-    return f"{lang_intro}{dependencies_section}{documentation_section}{requirements}"
+    return f"{lang_intro}{dependencies_section}{documentation_section}{resource_files_section}{requirements}"
 
 
 async def call_llm(
@@ -406,6 +457,12 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
     help="Target programming language",
 )
 @click.option(
+    "--target_type",
+    type=click.Choice(["library", "binary"]),
+    default="library",
+    help="Whether this target is a library or a binary executable",
+)
+@click.option(
     "--package",
     required=True,
     help="The package that can be used to specify importing this generated file.",
@@ -453,6 +510,19 @@ def read_dependencies(dep_paths: List[Path]) -> Dict[str, str]:
     help="Paths to Java dependency jar files needed for compilation.",
 )
 @click.option(
+    "--resource_file",
+    multiple=True,
+    type=click.Path(
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        path_type=Path,
+        readable=True,
+    ),
+    default=[],
+    help="Paths to resource files that will be available to the generated program.",
+)
+@click.option(
     "--llm_model", required=True, help="LLM model name (e.g., gemini-2.0-flash-001)"
 )
 @click.option(
@@ -470,10 +540,12 @@ async def main(
     input_txt: Path,
     output_file: Path,
     language: Language,
+    target_type: Literal["library", "binary"],
     package: str,
     dep_file: list[Path],
     dep_doc: list[Path],
     java_dep_jar: list[Path],
+    resource_file: list[Path],
     llm_model: str,
     temperature: float,
     max_output_tokens: int,
@@ -501,6 +573,8 @@ async def main(
             dep_doc_contents=dep_docs_contents,
             output_file=output_file,
             package=package,
+            resource_files=resource_file,
+            target_type=target_type,
         )
 
         # Get API Key
@@ -510,7 +584,7 @@ async def main(
             sys.exit(1)
 
         # Initialize variables for retry loop
-        max_retries = 3
+        max_retries = 5
         retries = 0
         success = False
         validation_result = None

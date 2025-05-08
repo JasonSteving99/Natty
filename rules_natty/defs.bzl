@@ -34,10 +34,15 @@ def _natty_library_impl(ctx):
     args.add("--output_file", output_file.path)
     args.add("--language", language)
     args.add("--package", ctx.attr.package)
+    # Add target_type to indicate if this is a binary or library
+    args.add("--target_type", ctx.attr.target_type)
     for f in dep_files:
         args.add("--dep_file", f.path)
     for f in ctx.files.docs:
         args.add("--dep_doc", f.path)
+    # Add resource files
+    for f in ctx.files.resources:
+        args.add("--resource_file", f.short_path)
     # Add any other necessary args: API endpoint, model name, maybe API key path?
     # SECURITY WARNING: Avoid passing API keys directly on the command line.
     # Use environment variables via ctx.actions.run(..., environments = ...)
@@ -57,7 +62,7 @@ def _natty_library_impl(ctx):
                     java_dep_jars.append(jar)
 
     # Define the inputs for the action
-    inputs = [input_txt] + dep_files + ctx.files.docs + [ctx.executable._nattyc]
+    inputs = [input_txt] + dep_files + ctx.files.docs + ctx.files.resources + [ctx.executable._nattyc]
     
     # If we're dealing with Java, add jar files to inputs
     if language == "java":
@@ -105,6 +110,11 @@ _natty_library_rule = rule(
             mandatory = True,
             doc = "The package that can be used to specify importing this generated file.",
         ),
+        "target_type": attr.string(
+            default = "library",
+            values = ["library", "binary"],
+            doc = "Whether this target is a library or a binary executable.",
+        ),
         "deps": attr.label_list(
             providers = [[NattyInfo]], # Dependents must provide NattyInfo
             doc = "List of other natty_library targets this target depends on.",
@@ -115,6 +125,10 @@ _natty_library_rule = rule(
         "docs": attr.label_list(
             allow_files=True,
             doc = "Paths to documentation files to be fed to the LLM to aid codegen.",
+        ),
+        "resources": attr.label_list(
+            allow_files=True,
+            doc = "Resource files that will be available to the generated program.",
         ),
         "llm_model": attr.string(
             default = "models/gemini-2.5-flash-preview-04-17",
@@ -173,7 +187,7 @@ def _get_import_str(name, language):
 
 
 def natty_library(
-    name, src, deps = [], py_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
+    name, src, deps = [], py_deps = [], docs = [], resources = [], llm_model = None, temperature = None, visibility = None, tags = [],
 ):
     """
     User-facing macro to generate a Python library from English text.
@@ -184,6 +198,7 @@ def natty_library(
       deps: List of other natty_library targets this depends on.
       py_deps: Additional Python library dependencies.
       docs: Documentation files to provide to the LLM for context.
+      resources: Resource files that will be available to the generated program.
       llm_model: Optional; overrides the default LLM model.
       temperature: Optional; overrides the default sampling temperature.
       visibility: Standard Bazel visibility.
@@ -199,8 +214,10 @@ def natty_library(
         src = src,
         language = "python",  # Fixed to Python for this macro
         package = _get_import_str(name, "python"),
+        target_type = "library",  # This is a library target
         deps = [dep + "_codegen" for dep in deps],
         docs = docs,
+        resources = resources,
         llm_model = llm_model, # Pass through optional model override
         temperature = temperature,
         tags = tags + ["natty_codegen_internal"], # Add internal tag if desired
@@ -218,7 +235,7 @@ def natty_library(
     )
 
 def natty_binary(
-    name, src, deps = [], py_deps = [], docs = [], llm_model = None, temperature = None, visibility = None, tags = [],
+    name, src, deps = [], py_deps = [], docs = [], resources = [], llm_model = None, temperature = None, visibility = None, tags = [],
 ):
     """
     User-facing macro to generate a Python binary executable from English text.
@@ -229,6 +246,7 @@ def natty_binary(
       deps: List of other natty_library targets this depends on.
       py_deps: Additional Python library dependencies.
       docs: Documentation files to provide to the LLM for context.
+      resources: Resource files that will be available to the generated program.
       llm_model: Optional; overrides the default LLM model.
       temperature: Optional; overrides the default sampling temperature.
       visibility: Standard Bazel visibility.
@@ -244,8 +262,10 @@ def natty_binary(
         src = src,
         language = "python",  # Fixed to Python for this macro
         package = _get_import_str(name, "python"),
+        target_type = "binary",  # This is a binary executable
         deps = [dep + "_codegen" for dep in deps],
         docs = docs,
+        resources = resources,
         llm_model = llm_model, # Pass through optional model override
         temperature = temperature,
         tags = tags + ["natty_codegen_internal"], # Add internal tag if desired
@@ -263,7 +283,7 @@ def natty_binary(
     )
 
 def natty_java_library(
-    name, src, deps = [], java_deps = [], docs = [], max_output_tokens = None, llm_model = None, temperature = None, visibility = None, tags = [],
+    name, src, deps = [], java_deps = [], docs = [], resources = [], max_output_tokens = None, llm_model = None, temperature = None, visibility = None, tags = [],
 ):
     """
     User-facing macro to generate a Java library from English text.
@@ -274,6 +294,8 @@ def natty_java_library(
       deps: List of other natty_java_library targets this depends on.
       java_deps: Additional Java library dependencies.
       docs: Documentation files to provide to the LLM for context.
+      resources: Resource files that will be available to the generated program.
+      max_output_tokens: Optional; maximum output tokens to generate.
       llm_model: Optional; overrides the default LLM model.
       temperature: Optional; overrides the default sampling temperature.
       visibility: Standard Bazel visibility.
@@ -289,9 +311,11 @@ def natty_java_library(
         src = src,
         language = "java",  # Fixed to Java for this macro
         package = _get_import_str(name, "java"),
+        target_type = "library",  # This is a library target
         deps = [dep + "_codegen" for dep in deps],
         java_deps = deps + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
+        resources = resources,
         max_output_tokens = max_output_tokens,
         llm_model = llm_model, # Pass through optional model override
         temperature = temperature,
@@ -304,6 +328,7 @@ def natty_java_library(
         name = name,
         srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
         deps = deps + java_deps,
+        resources = resources,
         # Disable ErrorProne for now unless/until I'm able to run ErrorProne during the codegen verification loop.
         javacopts = ["-XepDisableAllChecks"],
         visibility = visibility,
@@ -311,7 +336,7 @@ def natty_java_library(
     )
 
 def natty_java_binary(
-    name, src, deps = [], java_deps = [], docs = [], max_output_tokens = None, llm_model = None, temperature = None, visibility = None, tags = [],
+    name, src, deps = [], java_deps = [], docs = [], resources = [], max_output_tokens = None, llm_model = None, temperature = None, visibility = None, tags = [],
     main_class = None,
 ):
     """
@@ -323,6 +348,8 @@ def natty_java_binary(
       deps: List of other natty_java_library targets this depends on.
       java_deps: Additional Java library dependencies.
       docs: Documentation files to provide to the LLM for context.
+      resources: Resource files that will be available to the generated program.
+      max_output_tokens: Optional; maximum output tokens to generate.
       main_class: The main class to execute (if not specified, will be determined from the generated code).
       llm_model: Optional; overrides the default LLM model.
       temperature: Optional; overrides the default sampling temperature.
@@ -339,9 +366,11 @@ def natty_java_binary(
         src = src,
         language = "java",  # Fixed to Java for this macro
         package = _get_import_str(name, "java"),
+        target_type = "binary",  # This is a binary executable
         deps = [dep + "_codegen" for dep in deps],
         java_deps = deps + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
+        resources = resources,
         max_output_tokens = max_output_tokens,
         llm_model = llm_model, # Pass through optional model override
         temperature = temperature,
@@ -363,6 +392,7 @@ def natty_java_binary(
         srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
         main_class = main_class,
         deps = deps + java_deps,
+        resources = resources,
         # Disable ErrorProne for now unless/until I'm able to run ErrorProne during the codegen verification loop.
         javacopts = ["-XepDisableAllChecks"],
         visibility = visibility,
