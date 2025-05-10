@@ -57,7 +57,7 @@ def _natty_library_impl(ctx):
         java_dep_jars = []
         for dep in ctx.attr.java_deps:
             if JavaInfo in dep:
-                for jar in dep[JavaInfo].compile_jars.to_list():
+                for jar in dep[JavaInfo].transitive_compile_time_jars.to_list():
                     args.add("--java_dep_jar", jar.path)
                     java_dep_jars.append(jar)
 
@@ -302,18 +302,15 @@ def natty_java_library(
       tags: Standard Bazel tags.
     """
 
-    # Define the name for the internal code generation rule
-    codegen_rule_name = name + "_codegen"
-
     # Call the internal rule to perform the code generation
     _natty_library_rule(
-        name = codegen_rule_name,
+        name = name,
         src = src,
         language = "java",  # Fixed to Java for this macro
         package = _get_import_str(name, "java"),
         target_type = "library",  # This is a library target
-        deps = [dep + "_codegen" for dep in deps],
-        java_deps = deps + java_deps,  # Pass Java dependencies for compilation
+        deps = deps,
+        java_deps = [dep + "_java_lib" for dep in deps] + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
         resources = resources,
         max_output_tokens = max_output_tokens,
@@ -325,9 +322,13 @@ def natty_java_library(
 
     # Wrap the output in a standard java_library
     native.java_library(
-        name = name,
-        srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
-        deps = deps + java_deps,
+        name = name + "_java_lib",
+        srcs = [":" + name], # Use the output of the codegen rule
+        deps = [dep + "_java_lib" for dep in deps] + java_deps,
+        # For the sake of avoiding needing to constrain the LLM generated code to somehow know that 
+        # it shouldn't be importing anything it sees in the dependency impls that it's shown, just
+        # make sure that everything it could possibly see is importable.
+        exports = [dep + "_java_lib" for dep in deps] + java_deps,
         resources = resources,
         # Disable ErrorProne for now unless/until I'm able to run ErrorProne during the codegen verification loop.
         javacopts = ["-XepDisableAllChecks"],
@@ -357,18 +358,15 @@ def natty_java_binary(
       tags: Standard Bazel tags.
     """
 
-    # Define the name for the internal code generation rule
-    codegen_rule_name = name + "_codegen"
-
     # Call the internal rule to perform the code generation
     _natty_library_rule(
-        name = codegen_rule_name,
+        name = name,
         src = src,
         language = "java",  # Fixed to Java for this macro
         package = _get_import_str(name, "java"),
         target_type = "binary",  # This is a binary executable
-        deps = [dep + "_codegen" for dep in deps],
-        java_deps = deps + java_deps,  # Pass Java dependencies for compilation
+        deps = deps,
+        java_deps = [dep + "_java_lib" for dep in deps] + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
         resources = resources,
         max_output_tokens = max_output_tokens,
@@ -383,15 +381,14 @@ def natty_java_binary(
         # Default to package.ClassName format based on natty's naming convention
         java_package = _get_import_str(name, "java")
         # Extract class name from the end of the name (capitalize first letter)
-        class_name = name + "_codegen"
-        main_class = java_package + "." + class_name
+        main_class = java_package + "." + name
 
     # Wrap the output in a standard java_binary for execution
     native.java_binary(
-        name = name,
-        srcs = [":" + codegen_rule_name], # Use the output of the codegen rule
+        name = name + "_java_bin",
+        srcs = [":" + name], # Use the output of the codegen rule
         main_class = main_class,
-        deps = deps + java_deps,
+        deps = [dep + "_java_lib" for dep in deps] + java_deps,
         resources = resources,
         # Disable ErrorProne for now unless/until I'm able to run ErrorProne during the codegen verification loop.
         javacopts = ["-XepDisableAllChecks"],
