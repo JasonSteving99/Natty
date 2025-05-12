@@ -11,24 +11,9 @@ from typing import Dict, List, Literal, cast
 import asyncclick as click
 
 # Import the new Google Gen AI SDK
-from google import genai
-from google.genai.types import (
-    GenerateContentConfig,
-    HarmBlockThreshold,
-    HarmCategory,
-    SafetySetting,
-)
 from pydantic import BaseModel, Field
 
-
-@dataclass
-class LlmResponse:
-    """Data class to standardize LLM response format."""
-
-    text: str
-    model: str
-    usage: Dict[str, int]
-    finish_reason: str | None
+from python.nattyc.llm import call_llm
 
 
 @dataclass
@@ -212,103 +197,6 @@ Generate Java code for the natural language description the user will provide.
         raise ValueError(f"Unsupported language: {language}")
 
     return f"{lang_intro}{dependencies_section}{documentation_section}{resource_files_section}{requirements}"
-
-
-async def call_llm(
-    *,
-    system_prompt: str,
-    english_description: str,
-    model_name: str,
-    api_key: str,
-    temperature: float = 0.2,
-    max_output_tokens: int = 8192,
-) -> LlmResponse:
-    """Call the Gemini API to generate code.
-
-    Args:
-        prompt: The formatted prompt to send to the LLM
-        model_name: The specific Gemini model to use
-        api_key: API key for authentication
-        temperature: Sampling temperature (lower = more deterministic)
-        max_output_tokens: Maximum tokens in the response
-
-    Returns:
-        An LlmResponse object containing the generated code and metadata
-
-    Raises:
-        ValueError: If required parameters are missing or invalid
-        RuntimeError: If the API call fails
-    """
-    logger = logging.getLogger(__name__)
-
-    logger.debug(f"--- SYSTEM PROMPT for {model_name} ---")
-    logger.debug(
-        system_prompt
-    )  # Use debug to avoid showing the entire prompt in normal operation
-    logger.debug("--- END SYSTEM PROMPT ---")
-
-    if not api_key:
-        raise ValueError("Error: LLM_API_KEY not set.")
-
-    try:
-        # Create a client instance
-        client = genai.Client(api_key=api_key)
-
-        # Generate the content
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=english_description,
-            config=GenerateContentConfig(
-                system_instruction=system_prompt,
-                candidate_count=1,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                # Set up safety settings - allow code generation
-                safety_settings=[
-                    SafetySetting(
-                        category=category,
-                        threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                    )
-                    for category in HarmCategory
-                    if category is not HarmCategory.HARM_CATEGORY_UNSPECIFIED
-                ],
-                response_mime_type="application/json",
-                response_schema=GeneratedCode,
-            ),
-        )
-
-        # Handle potential content filtering
-        if response.candidates and response.candidates[0].finish_reason == "SAFETY":
-            raise RuntimeError("Content was filtered due to safety concerns")
-
-        # Extract the text from the response
-        text = ""
-        if response.parsed:
-            # Parse the LLM's response and extract ONLY the generated code - the reasoning was
-            # just for the model's own benefit.
-            text = cast(GeneratedCode, response.parsed).generated_code
-
-        # Create usage stats dictionary (estimate, as Gemini might not provide exact counts)
-        usage = {
-            "input_tokens": (len(system_prompt) + len(english_description))
-            // 4,  # Rough estimate
-            "completion_tokens": len(text) // 4,  # Rough estimate
-            "total_tokens": (len(system_prompt) + len(english_description) + len(text))
-            // 4,  # Rough estimate
-        }
-
-        # Get finish reason
-        finish_reason = None
-        if response.candidates:
-            finish_reason = response.candidates[0].finish_reason
-
-        return LlmResponse(
-            text=text, model=model_name, usage=usage, finish_reason=finish_reason
-        )
-
-    except Exception as e:
-        logger.error(f"Error calling Gemini API: {str(e)}")
-        raise RuntimeError(f"Failed to generate code: {str(e)}")
 
 
 def validate_generated_code(
@@ -597,9 +485,11 @@ async def main(
                 english_description=english_text,
                 model_name=llm_model,
                 api_key=api_key,
+                response_schema=GeneratedCode,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
             )
+            generated_code = cast(GeneratedCode, response.parsed).generated_code
 
             # Write the output with appropriate language-specific header
             # This ensures the file exists for Java compilation validation
@@ -608,17 +498,17 @@ async def main(
                     f.write("# Usage: Import from this package using the following:\n")
                     f.write(f"# from {package} import <name to import>\n\n")
                 # For Java, the package declaration should already be in the code
-                f.write(response.text)
+                f.write(generated_code)
 
             # Validate the generated code
             if language == Language.JAVA:
                 # For Java, pass the output file and jar dependencies for proper compilation
                 validation_result = validate_generated_code(
-                    response.text, language, output_file, java_dep_jar
+                    generated_code, language, output_file, java_dep_jar
                 )
             else:
                 # For Python, we can validate without the file
-                validation_result = validate_generated_code(response.text, language)
+                validation_result = validate_generated_code(generated_code, language)
 
             # If validation passed, mark as success and break out of the retry loop
             if validation_result.is_valid:
@@ -640,7 +530,7 @@ IMPORTANT: Your previous attempt at generating code failed validation with the f
 Here is your previous code that needs to be fixed:
 
 ```
-{response.text}
+{generated_code}
 ```
 
 Please fix the issues and provide a COMPLETE implementation of the code, not just the changes.
@@ -653,12 +543,14 @@ Make sure your code handles the errors mentioned above.
         if success:
             # Log success message with usage stats
             logger.info(f"Successfully generated {output_file}")
-            logger.info(f"Usage stats: {json.dumps(response.usage)}")
+            if response:
+                logger.info(f"Usage stats: {json.dumps(response.usage)}")
         else:
             # Log the final error and exit with failure
-            logger.error(
-                f"Generated code failed validation after {max_retries} attempts. Last error: {validation_result.error_message}"
-            )
+            if validation_result:
+                logger.error(
+                    f"Generated code failed validation after {max_retries} attempts. Last error: {validation_result.error_message}"
+                )
             sys.exit(1)
 
     except Exception as e:

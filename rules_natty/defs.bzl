@@ -1,6 +1,4 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_library") # Creating a py_library wrapper
-
-
 load("@rules_java//java:defs.bzl", "JavaInfo")
 
 """Provider for Natty library information."""
@@ -12,7 +10,13 @@ NattyInfo = provider(
     doc = "Provides information about a Natty-generated library.",
 )
 
-# //tools/rules_vibe/defs.bzl (continued)
+"""Provider for Natty Header information."""
+NattyHeaderInfo = provider(
+    fields = {
+        "decompiled_header_source": "The File object representing the decompiled source code of the Turbine-generated hjar.",
+    },
+    doc = "Provides information about the Header for a Natty-generated library.",
+)
 
 def _natty_library_impl(ctx):
     """Implementation of the natty_library rule."""
@@ -25,8 +29,8 @@ def _natty_library_impl(ctx):
     # Collect generated source files from direct dependencies
     dep_files = []
     for dep in ctx.attr.deps:
-        if NattyInfo in dep:
-            dep_files.append(dep[NattyInfo].generated_source)
+        if NattyHeaderInfo in dep:
+            dep_files.append(dep[NattyHeaderInfo].decompiled_header_source)
 
     # Prepare arguments for the LLM caller script
     args = ctx.actions.args()
@@ -116,7 +120,7 @@ _natty_library_rule = rule(
             doc = "Whether this target is a library or a binary executable.",
         ),
         "deps": attr.label_list(
-            providers = [[NattyInfo]], # Dependents must provide NattyInfo
+            providers = [[NattyHeaderInfo]], # Dependents must provide NattyHeaderInfo
             doc = "List of other natty_library targets this target depends on.",
         ),
         "java_deps": attr.label_list(
@@ -158,18 +162,10 @@ _natty_library_rule = rule(
     doc = "Generates code in a specified language from Natural Language text using an LLM.",
 )
 
-"""Provider for Natty Header information."""
-NattyHeaderInfo = provider(
-    fields = {
-        "decompiled_header_source": "The File object representing the decompiled source code of the Turbine-generated hjar.",
-    },
-    doc = "Provides information about the Header for a Natty-generated library.",
-)
-
 def _natty_header_impl(ctx):
     # Get the rule name and output file
     name = ctx.label.name
-    output_file = ctx.actions.declare_file(name + ".java")
+    raw_header_output_file = ctx.actions.declare_file(name + "_raw.java")
 
     # Prepare arguments for NattyJavaDecompiler.
     args = ctx.actions.args()
@@ -185,19 +181,54 @@ def _natty_header_impl(ctx):
         fail("Failed to find hjar for {0}".format(ctx.attr.src.label.name))
 
     args.add("--classname", ctx.attr.classname)
-    args.add("--outfile", output_file)
+    args.add("--outfile", raw_header_output_file)
     
+    # Generate the raw header itself. This is technically going to be under-specified for
+    # consumption in isolation since it doesn't have any parameter names or javadoc.
     ctx.actions.run(
         executable = ctx.executable._natty_decompiler,
         arguments = [args],
         inputs = depset([hjar]),  # Use depset for efficiency
-        outputs = [output_file],
+        outputs = [raw_header_output_file],
         progress_message = "Generating Natty header for {0}".format(ctx.label),
         mnemonic = "NattyJavaDecompiler",
     )
+
+    # Now generate the additional usage context necessary to fill in the gaps in the raw
+    # header above.
+    output_file = ctx.actions.declare_file(name + ".java")
+    natty_src = ctx.attr.natty_src[NattyInfo].generated_source
+    args = ctx.actions.args()
+    args.add("--source_file", natty_src.path)
+    args.add("--raw_header_file", raw_header_output_file.path)
+    args.add("--output_file", output_file.path)
+    # Add any other necessary args: API endpoint, model name, maybe API key path?
+    # SECURITY WARNING: Avoid passing API keys directly on the command line.
+    # Use environment variables via ctx.actions.run(..., environments = ...)
+    # or have the script read from a secure location/config.
+    args.add("--llm_model", ctx.attr.llm_model)
+    args.add("--temperature", ctx.attr.temperature)
+    args.add("--max_output_tokens", ctx.attr.max_output_tokens)
+
+    # This is generating the usage description and prepending it as a file-level javadoc comment
+    # on the raw header generated above so that we can try providing the LLM consumer the 
+    # additional necessary context to understand this component's usage via its under-specified 
+    # raw header alone.
+    ctx.actions.run(
+        executable = ctx.executable._natty_usage_description_generator,
+        arguments = [args],
+        inputs = depset([natty_src, raw_header_output_file]),  # Use depset for efficiency
+        outputs = [output_file],
+        progress_message = "Generating Natty usage description for {0}".format(ctx.label),
+        mnemonic = "NattyUsageDescriptionGenerator",
+        # Enable LLM_API_KEY env var to be passed along to nattyc via --action_env=LLM_API_KEY=foo
+        # Also allows the javac command installed on the machine to be used rather than Bazel's
+        # builtin javac toolchain. TODO! Make this use the hermetic javac toolchain.
+        use_default_shell_env = True,
+    )
     
     return [
-        DefaultInfo(files = depset([output_file])),
+        DefaultInfo(files = depset([raw_header_output_file, output_file])),
         NattyHeaderInfo(decompiled_header_source = output_file),
     ]
 
@@ -213,8 +244,31 @@ _natty_header = rule(
             mandatory = True,
             doc = "Fully qualified name of the class to decompile.",
         ),
+        "natty_src": attr.label(
+            providers = [NattyInfo],
+            mandatory = True,
+            doc = "Natty library source that's having its header generated.",
+        ),
+        "llm_model": attr.string(
+            default = "models/gemini-2.5-flash-preview-04-17",
+            doc = "Identifier for the LLM model to use. Currently supports Gemini models only.",
+        ),
+        "temperature": attr.string(
+            default = "0.2",
+            doc = "A floating point number in the range [0.0, 2.0] for the temperature to pass to the LLM. Lower number implies less creativity by way of less randomness in sampling next token."
+        ),
+        "max_output_tokens": attr.int(
+            default = 1024,
+            doc = "Maximum output tokens for usage description generation.",
+        ),
         "_natty_decompiler": attr.label(
             default = Label("//java/com/natty/decompiler:decompiler"), 
+            cfg = "exec", # Runs in the execution configuration
+            executable = True,
+            allow_files = True,
+        ),
+        "_natty_usage_description_generator": attr.label(
+            default = Label("//python/nattyc:generate_usage_description"), 
             cfg = "exec", # Runs in the execution configuration
             executable = True,
             allow_files = True,
@@ -373,7 +427,8 @@ def natty_java_library(
         language = "java",  # Fixed to Java for this macro
         package = _get_import_str(name, "java"),
         target_type = "library",  # This is a library target
-        deps = deps,
+        # Use the simplified headers for codegen instead of the full source.
+        deps = [dep + "_natty_header" for dep in deps],
         java_deps = [dep + "_java_lib" for dep in deps] + java_deps,  # Pass Java dependencies for compilation
         docs = docs,
         resources = resources,
@@ -407,6 +462,10 @@ def natty_java_library(
         name = name + "_natty_header",
         src = ":" + name + "_java_lib",
         classname = _get_import_str(name, "java") + "." + name,
+        natty_src = ":" + name,
+        max_output_tokens = max_output_tokens,
+        llm_model = llm_model, # Pass through optional model override
+        temperature = temperature,
         visibility = visibility,
         tags = tags,
     )

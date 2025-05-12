@@ -32,7 +32,7 @@
         "source.organizeImports": "explicit"
       }
     },
-    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.typeCheckingMode": "standard",
     "files.autoSave": "onWindowChange",
     "files.exclude": {
       "**/__pycache__": true,
