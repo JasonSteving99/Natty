@@ -11,4 +11,5 @@ java_binary(
         "//:fernflower_windup_decompiler_api_forge_addon",
         "//:google-options",
     ],
+    visibility = ["//visibility:public"],
 )
