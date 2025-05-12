@@ -53,3 +53,25 @@ use_repo(pip, "pypi")
 ################################################################################
 # END: Python Configuration Copied from rules_python Repo:
 ################################################################################
+
+
+################################################################################
+# END: Maven Deps Configuration                                                #
+################################################################################
+bazel_dep(name = "rules_jvm_external", version = "6.7")
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+# Now you can `REPIN=1 bazel run @maven//:pin` to create a JSON lockfile of the 
+# transitive dependencies, in a format that rules_jvm_external can use later. 
+# You'll check this file into the repository.
+# See: https://github.com/bazel-contrib/rules_jvm_external/blob/d8af22108bd8b353a226140570008231f2921931/docs/bzlmod.md?plain=1#L1
+maven.install(
+    artifacts = [
+        "org.jboss.windup.decompiler:decompiler-fernflower:6.3.9.Final",
+        "com.github.pcj:google-options:jar:1.0.0",
+    ],
+    lock_file = "//:maven_install.json",
+)
+use_repo(maven, "maven")
+################################################################################
+# END: Maven Deps Configuration                                                #
+################################################################################

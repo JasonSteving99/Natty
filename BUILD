@@ -42,3 +42,25 @@ sync_venv(
 ################################################################################
 # END: UV Setup
 ################################################################################
+
+################################################################################
+# BEGIN: Aliases for Maven Deps
+################################################################################
+alias(
+    name = "fernflower",
+    actual = "@maven//:org_jboss_windup_decompiler_decompiler_fernflower",
+    visibility = ["//visibility:public"],
+)
+alias(
+    name = "fernflower_windup_decompiler_api_forge_addon",
+    actual = "@maven//:org_jboss_windup_decompiler_decompiler_api_forge_addon",
+    visibility = ["//visibility:public"],
+)
+alias(
+    name = "google-options",
+    actual = "@maven//:com_github_pcj_google_options",
+    visibility = ["//visibility:public"],
+)
+################################################################################
+# END: Aliases for Maven Deps
+################################################################################
