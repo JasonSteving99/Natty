@@ -29,3 +29,4 @@ user.bazelrc
 **/node_modules
 # Python compiled files
 **/*.pyc
+**/CLAUDE.local.md
